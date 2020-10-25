@@ -2,6 +2,7 @@ use std::thread;
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::{Utc, DateTime, Duration};
 use pcap::{Device,Capture};
@@ -15,7 +16,7 @@ const AUDIO_ABOVE: u16 = 90;
 const VIDEO_ABOVE: u16 = 500;
 
 
-#[derive(Hash, Eq, PartialEq, Debug, Clone)]
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
 struct PacketStream {
     source_port: u16,
     average_packet_size: u16,
@@ -57,21 +58,23 @@ struct ZoomChannels {
 
 fn main() {
     println!("Device listing: {:?}", Device::list().unwrap());
-    let main_device = Device::lookup().unwrap();
-    // let main_device = Device {name: "enx803f5dc04dd5".to_string(), desc: None};
+    let device_name = "wlp2s0".to_string();
 
-    println!("Got device {:?}", main_device);
+    println!("Got device {:?}", device_name);
 
     let channel_status = Arc::new(RwLock::new(ZoomChannels {
         video: None,
         audio: None,
         control: None
     }));
+    let run_flag = Arc::new(AtomicBool::new(true));
 
-    {
-        let thread_channel_status = Arc::clone(&channel_status);
-        thread::spawn(move || sniff_packets(main_device, thread_channel_status));
-    }
+    let thread_channel_status = Arc::clone(&channel_status);
+    let thread_run = Arc::clone(&run_flag);
+    let thread_device = device_name.clone();
+
+    let mut discover_mode = true;
+    thread::spawn(move || discover_ports(thread_device, thread_channel_status, thread_run));
 
     let state_change_interval = Duration::milliseconds(200);
 
@@ -107,14 +110,28 @@ fn main() {
 
         println!("Statuses: Video: {:?} Audio: {:?}", video_status, audio_status);
 
+        if video_status != "unknown" && audio_status != "unknown" && discover_mode {
+            println!("Both channels have a status, switching to monitor mode");
+            run_flag.store(false, Ordering::Relaxed);
+            // discover_thread.join();
+            let thread_channel_status = Arc::clone(&channel_status);
+            let thread_device = device_name.clone();
+            thread::spawn(move || monitor_ports(
+                thread_device,
+                thread_channel_status
+            ));
+            discover_mode = false;
+        }
+
         thread::sleep(std::time::Duration::from_millis(100));
 
     }
 }
 
-fn sniff_packets(target_device: Device, channel_map: Arc<RwLock<ZoomChannels>>) {
-    // Start sniffing packet headers, filtered only to the UDP traffic we want
-    let mut cap = Capture::from_device(target_device).unwrap()
+fn discover_ports(device_name: String, channel_map: Arc<RwLock<ZoomChannels>>, thread_run: Arc<AtomicBool>) {
+    // Start sniffing packet headers, filtered only to the UDP traffic we want, to find the ports likely in use for each channel
+    let capture_device = Device {name: device_name, desc: None};
+    let mut cap = Capture::from_device(capture_device).unwrap()
         .promisc(false)
         .snaplen(50)
         .timeout(100)
@@ -145,7 +162,49 @@ fn sniff_packets(target_device: Device, channel_map: Arc<RwLock<ZoomChannels>>) 
                 }
             }
         }
+
+        if !thread_run.load(Ordering::Relaxed) {
+            break;
+        }
     }
+}
+
+fn monitor_ports(device_name: String, channel_map: Arc<RwLock<ZoomChannels>>) {
+    // Run a packet capture to monitor just the interesting ports rather than all of them
+    let mut video_stream;
+    let mut audio_stream;
+    
+    {
+        let read_map = channel_map.read().unwrap();
+        video_stream = read_map.video.unwrap().clone();
+        audio_stream = read_map.audio.unwrap().clone();
+    }
+
+    let capture_device = Device {name: device_name, desc: None};
+    let mut cap = Capture::from_device(capture_device).unwrap()
+        .promisc(false)
+        .snaplen(50)
+        .timeout(100)
+        .open().unwrap();
+    cap.filter(&format!("udp && (src port {} || src port {})", video_stream.source_port, audio_stream.source_port)).unwrap();
+
+    // Monitor each packet, and update our shared state
+    while let Ok(packet) = cap.next() {
+        let parsed_packet = SlicedPacket::from_ethernet(&packet).unwrap();
+        let (port, length) = identify_packet(parsed_packet);
+
+        {
+            let mut write_map = channel_map.write().unwrap();
+            if port == video_stream.source_port {
+                video_stream.add_packet(length);
+                write_map.video = Some(video_stream.clone());
+            } else if port == audio_stream.source_port {
+                audio_stream.add_packet(length);
+                write_map.audio = Some(audio_stream.clone());
+            }
+        }
+    }
+
 }
 
 fn identify_packet(packet: SlicedPacket) -> (u16, u16) {
