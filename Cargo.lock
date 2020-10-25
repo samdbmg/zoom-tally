@@ -26,6 +26,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "enclose"
+version = "1.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1056f553da426e9c025a662efa48b52e62e0a3a7648aa2d15aeaaf7f0d329357"
+
+[[package]]
 name = "etherparse"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -67,6 +73,12 @@ checksum = "f912b9e56d1d4851a5175c118fc6503c9f69a8fe1a0649a51aff20b92c757491"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "stoppable_thread"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6700c1ed393aa9c1fff950032a64a4856436dadee820641ce1b914cab65019f"
 
 [[package]]
 name = "time"
@@ -112,6 +124,8 @@ name = "zoom-tally-rust-poc"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "enclose",
  "etherparse",
  "pcap",
+ "stoppable_thread",
 ]
