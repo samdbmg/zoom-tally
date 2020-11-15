@@ -1,5 +1,5 @@
 [package]
-name = "zoom-tally-rust-poc"
+name = "zoom-tally"
 version = "0.1.0"
 authors = ["Sam Mesterton-Gibbons <sam@samn.co.uk>"]
 edition = "2018"
