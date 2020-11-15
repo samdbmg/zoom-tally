@@ -1,3 +1,8 @@
+//! Detect the state of audio and video on active Zoom calls
+//!
+//! Detects the ports Zoom is using to send audio and video from this computer, and reports
+//! whether they are currently active (i.e is the camera on, is the mic open?). Outputs data
+//! to stdout which can be parsed by other tools.
 use std::thread;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -9,7 +14,6 @@ use enclose::enclose;
 
 mod stream_analyser;
 mod zoom_channels;
-
 
 fn main() {
     println!("Device listing: {:?}", Device::list().unwrap());

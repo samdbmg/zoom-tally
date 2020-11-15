@@ -8,13 +8,19 @@ use stoppable_thread::SimpleAtomicBool;
 
 use crate::zoom_channels;
 
+/// Length of the moving average window used to calculate average packet size
 const BITRATE_WINDOW_SIZE: u16 = 10;
 
+/// If the packet is smaller than average_size / DROP_FACTOR, it's a keep alive, ignore it
 const DROP_FACTOR: u16 = 5 ;
 
+/// A stream of packets larger than this many bytes is probably audio
 const AUDIO_ABOVE: u16 = 90;
+
+/// A stream of packets larger than this many bytes is probably video
 const VIDEO_ABOVE: u16 = 500;
 
+/// A single port sending a stream of packets to a remote server
 #[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
 pub struct PacketStream {
     pub source_port: u16,
@@ -33,6 +39,10 @@ impl PacketStream {
         }
     }
 
+    /// Add a single packet to the stream, causing the average size and timestamp to update
+    ///
+    /// Note that packets smaller than `average_packet_size / DROP_FACTOR` will be ignored (and won't update the last seen timestamp)
+    ///
     pub fn add_packet(&mut self, packet_length: u16) {
         // If the packet is less than 1/DROP_FACTOR the size of the average, ignore it, it's a keepalive
         if packet_length * DROP_FACTOR >= self.average_packet_size {
@@ -48,6 +58,11 @@ impl PacketStream {
     }
 }
 
+/// Construct and start a packet capture
+///
+/// # Arguments
+/// * `device_name` - Name of the device to capture, as known by the kernel
+/// * `filter` - BPF filter to apply to the capture
 fn get_capture(device_name: String, filter: String) -> Capture<Active> {
     let capture_device = Device {name: device_name, desc: None};
     let mut cap = Capture::from_device(capture_device).unwrap()
@@ -60,6 +75,7 @@ fn get_capture(device_name: String, filter: String) -> Capture<Active> {
     return cap;
 }
 
+/// Given a packet, extract the UDP source port and packet length and return a tuple
 fn unpack_packet(packet: Packet) -> (u16, u16) {
     let parsed_packet = SlicedPacket::from_ethernet(&packet).unwrap();
 
@@ -72,9 +88,19 @@ fn unpack_packet(packet: Packet) -> (u16, u16) {
     (udp_header.source_port(), udp_header.length())
 }
 
+/// Implements a capture process that discovers which port is which (video, audio, control)
 pub struct PortDiscoveryCapture ();
 
 impl PortDiscoveryCapture {
+    /// Start a capture to detect which port is which
+    ///
+    /// Watches for outgoing UDP packets to port 8801 and measures their size to guess which is audio, which is video and
+    /// which is the control port. Expects to be run in a thread and report back to the main thread.
+    ///
+    /// # Arguments
+    /// * `capture_device` - Name of device (as known to the system) to capture packets on
+    /// * `channel_map` - This will be updated with each port as detections are made
+    /// * `stopped` - Set to true to cause the thread to exit
     pub fn run(capture_device: String, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
         let mut cap = get_capture(capture_device, "udp && dst port 8801".to_string());
         let mut stream_map = HashMap::new();
@@ -106,9 +132,19 @@ impl PortDiscoveryCapture {
     }
 }
 
+/// Implements a capture process that watches the audio and video ports only, and updates their last packet times
 pub struct PortMonitorCapture ();
 
 impl PortMonitorCapture {
+    /// Start a capture to detect when the audio and video ports were last used
+    ///
+    /// Watches for outgoing UDP packets on the audio and video ports, and reports when they last had a packet seen.
+    /// Expects to be run in a thread and report back to the main thread.
+    ///
+    /// # Arguments
+    /// * `capture_device` - Name of device (as known to the system) to capture packets on
+    /// * `channel_map` - Existing map of audio and video ports, to update as detections are made
+    /// * `stopped` - Set to true to cause the thread to exit
     pub fn run(capture_device: String, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
         let mut video_stream;
         let mut audio_stream;
