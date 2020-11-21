@@ -116,11 +116,31 @@ impl PortDiscoveryCapture {
                 {
                     let mut write_map = channel_map.write().unwrap();
                     if matched_stream.average_packet_size > VIDEO_ABOVE {
+                        // If it's big enough to be video, it probably is - audio doesn't tend to lead to large packets
                         write_map.video = Some(matched_stream.clone());
+
+                        // Check it didn't get misassigned to the audio port, remove it if so
+                        if PortDiscoveryCapture::existing_match(port, write_map.audio) {
+                            write_map.audio = None;
+                        }
+
                     } else if matched_stream.average_packet_size > AUDIO_ABOVE {
-                        write_map.audio = Some(matched_stream.clone());
+                        // Check this isn't currently the video port - sometimes we get a small packet
+                        if !PortDiscoveryCapture::existing_match(port, write_map.video) {
+                            write_map.audio = Some(matched_stream.clone());
+                        }
+
+                        // Check it didn't get misassigned to the control port, remove it if so
+                        if PortDiscoveryCapture::existing_match(port, write_map.control) {
+                            write_map.control = None;
+                        }
                     } else {
-                        write_map.control = Some(matched_stream.clone());
+                        // Check we don't currently think this port is the audio or video port
+                        // In that case it's unlikely to be control!
+                        if !PortDiscoveryCapture::existing_match(port, write_map.video) &&
+                            !PortDiscoveryCapture::existing_match(port, write_map.audio) {
+                            write_map.control = Some(matched_stream.clone());
+                        }
                     }
                 }
             }
@@ -129,6 +149,16 @@ impl PortDiscoveryCapture {
                 break;
             }
         }
+    }
+
+    fn existing_match(port: u16, stream: Option<PacketStream>) -> bool {
+        if let Some(stream_data) = stream {
+            if stream_data.source_port == port {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 
