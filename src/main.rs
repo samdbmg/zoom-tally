@@ -11,16 +11,37 @@ use chrono::{Utc, Duration};
 use pcap::Device;
 use stoppable_thread;
 use enclose::enclose;
+use argparse::{ArgumentParser, StoreOption};
 
 mod stream_analyser;
 mod zoom_channels;
 mod custom_device;
 use custom_device::CustomDevice;
 
+
+fn parse_args() -> CustomDevice {
+    let mut device_name: Option<String> = None;
+
+    {
+        let mut parser = ArgumentParser::new();
+        parser.set_description("Analyse outgoing traffic to detect if we're in a Zoom meeting, and microphone and camera state");
+
+        parser.refer(&mut device_name)
+            .add_option(&["-d", "--device"], StoreOption, "Network device to capture from - will try to guess if not set");
+
+        parser.parse_args_or_exit();
+    }
+
+    let capture_device = match device_name {
+        Some(name) => CustomDevice::device_from_name(name),
+        None => CustomDevice::from(Device::lookup().unwrap())
+    };
+
+    return capture_device
+}
+
 fn main() {
-    println!("Device listing: {:?}", Device::list().unwrap());
-    let _capture_device = CustomDevice::device_from_name("wlp2s0".to_string());
-    let capture_device = CustomDevice::from(Device::lookup().unwrap());
+    let capture_device = parse_args();
 
     println!("Got device {:?}", capture_device);
 
