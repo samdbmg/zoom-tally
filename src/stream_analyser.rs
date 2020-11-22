@@ -79,13 +79,13 @@ fn get_capture(capture_device: CustomDevice, filter: String) -> Capture<Active> 
 fn unpack_packet(packet: Packet) -> (u16, u16) {
     let parsed_packet = SlicedPacket::from_ethernet(&packet).unwrap();
 
-    let transport_header = parsed_packet.transport.unwrap();
-    // Cast the transport header - we know it's UDP because there's a BPF filter
-    let udp_header = if let TransportSlice::Udp(transport_header) = transport_header {
-        transport_header
-    } else { unreachable!() };
+    return match parsed_packet.transport {
+        Some(TransportSlice::Udp(udp_header)) => {
+            (udp_header.source_port(), udp_header.length())
+        },
+        _ => panic!("Unexpectedly got a non-UDP packet, despite applying a UDP filter")
 
-    (udp_header.source_port(), udp_header.length())
+    }
 }
 
 /// Implements a capture process that discovers which port is which (video, audio, control)
