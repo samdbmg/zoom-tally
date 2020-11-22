@@ -11,7 +11,7 @@ use chrono::{Utc, Duration};
 use pcap::Device;
 use stoppable_thread;
 use enclose::enclose;
-use argparse::{ArgumentParser, StoreOption};
+use argparse::{ArgumentParser, StoreOption, StoreTrue};
 
 mod stream_analyser;
 mod zoom_channels;
@@ -20,6 +20,7 @@ use custom_device::CustomDevice;
 
 
 fn parse_args() -> CustomDevice {
+    let mut list_devices: bool = false;
     let mut device_name: Option<String> = None;
 
     {
@@ -29,7 +30,22 @@ fn parse_args() -> CustomDevice {
         parser.refer(&mut device_name)
             .add_option(&["-d", "--device"], StoreOption, "Network device to capture from - will try to guess if not set");
 
+
+        parser.refer(&mut list_devices)
+            .add_option(&["--list"], StoreTrue, "Just list network devices and exit");
+
         parser.parse_args_or_exit();
+    }
+
+    if list_devices {
+        println!("Network devices:");
+
+        let device_list = Device::list().unwrap();
+        for device in device_list {
+            println!("{}", device.name);
+        }
+
+        std::process::exit(0);
     }
 
     let capture_device = match device_name {
