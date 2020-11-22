@@ -2,11 +2,12 @@ use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use pcap::{Device, Capture, Active, Packet};
+use pcap::{Capture, Active, Packet};
 use etherparse::{SlicedPacket,TransportSlice};
 use stoppable_thread::SimpleAtomicBool;
 
 use crate::zoom_channels;
+use crate::custom_device::CustomDevice;
 
 /// Length of the moving average window used to calculate average packet size
 const BITRATE_WINDOW_SIZE: u16 = 10;
@@ -61,11 +62,10 @@ impl PacketStream {
 /// Construct and start a packet capture
 ///
 /// # Arguments
-/// * `device_name` - Name of the device to capture, as known by the kernel
+/// * `capture_device` - Device to capture from
 /// * `filter` - BPF filter to apply to the capture
-fn get_capture(device_name: String, filter: String) -> Capture<Active> {
-    let capture_device = Device {name: device_name, desc: None};
-    let mut cap = Capture::from_device(capture_device).unwrap()
+fn get_capture(capture_device: CustomDevice, filter: String) -> Capture<Active> {
+    let mut cap = Capture::from_device(capture_device.to_pcap_device()).unwrap()
         .promisc(false)
         .snaplen(50)
         .timeout(100)
@@ -98,10 +98,10 @@ impl PortDiscoveryCapture {
     /// which is the control port. Expects to be run in a thread and report back to the main thread.
     ///
     /// # Arguments
-    /// * `capture_device` - Name of device (as known to the system) to capture packets on
+    /// * `capture_device` - Device (as known to the system) to capture packets on
     /// * `channel_map` - This will be updated with each port as detections are made
     /// * `stopped` - Set to true to cause the thread to exit
-    pub fn run(capture_device: String, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
+    pub fn run(capture_device: CustomDevice, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
         let mut cap = get_capture(capture_device, "udp && dst port 8801".to_string());
         let mut stream_map = HashMap::new();
 
@@ -142,10 +142,10 @@ impl PortMonitorCapture {
     /// Expects to be run in a thread and report back to the main thread.
     ///
     /// # Arguments
-    /// * `capture_device` - Name of device (as known to the system) to capture packets on
+    /// * `capture_device` - Device (as known to the system) to capture packets on
     /// * `channel_map` - Existing map of audio and video ports, to update as detections are made
     /// * `stopped` - Set to true to cause the thread to exit
-    pub fn run(capture_device: String, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
+    pub fn run(capture_device: CustomDevice, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
         let mut video_stream;
         let mut audio_stream;
         {

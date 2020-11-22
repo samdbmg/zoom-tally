@@ -14,12 +14,15 @@ use enclose::enclose;
 
 mod stream_analyser;
 mod zoom_channels;
+mod custom_device;
+use custom_device::CustomDevice;
 
 fn main() {
     println!("Device listing: {:?}", Device::list().unwrap());
-    let device_name = "enx803f5dc04dd5".to_string();
+    let _capture_device = CustomDevice::device_from_name("wlp2s0".to_string());
+    let capture_device = CustomDevice::from(Device::lookup().unwrap());
 
-    println!("Got device {:?}", device_name);
+    println!("Got device {:?}", capture_device);
 
     let channel_status = Arc::new(RwLock::new(zoom_channels::ZoomChannels {
         video: None,
@@ -27,8 +30,8 @@ fn main() {
         control: None
     }));
 
-    let mut packet_thread = stoppable_thread::spawn(enclose!((device_name, channel_status) move |stopped| {
-        stream_analyser::PortDiscoveryCapture::run(device_name, channel_status, stopped)
+    let mut packet_thread = stoppable_thread::spawn(enclose!((capture_device, channel_status) move |stopped| {
+        stream_analyser::PortDiscoveryCapture::run(capture_device, channel_status, stopped)
     }));
 
     let mut discover_mode = true;
@@ -71,10 +74,9 @@ fn main() {
             packet_thread.stop().join().unwrap();
             discover_mode = false;
 
-            packet_thread = stoppable_thread::spawn(enclose!((device_name, channel_status) move |stopped| {
-                stream_analyser::PortMonitorCapture::run(device_name, channel_status, stopped)
+            packet_thread = stoppable_thread::spawn(enclose!((capture_device, channel_status) move |stopped| {
+                stream_analyser::PortMonitorCapture::run(capture_device, channel_status, stopped)
             }));
-
         }
 
         thread::sleep(std::time::Duration::from_millis(100));
