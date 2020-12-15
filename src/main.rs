@@ -7,7 +7,7 @@ use std::thread;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use chrono::{Utc, Duration};
+use chrono::{Utc, Duration, DateTime};
 use pcap::Device;
 use stoppable_thread;
 use enclose::enclose;
@@ -56,6 +56,19 @@ fn parse_args() -> CustomDevice {
     return capture_device
 }
 
+fn get_channel_status(stream: Option<stream_analyser::PacketStream>, now: DateTime<Utc>, timeout: Duration) -> String {
+    match &stream {
+        Some(stream) => {
+            if now - stream.last_packet_seen > timeout {
+                "off".to_string()
+            } else {
+                "on".to_string()
+            }
+        }
+        None => "unknown".to_string()
+    }
+}
+
 fn main() {
     let capture_device = parse_args();
 
@@ -72,39 +85,21 @@ fn main() {
     }));
 
     let mut discover_mode = true;
-    let state_change_interval = Duration::milliseconds(200);
 
     loop {
         println!("Current streams known {:?}", channel_status);
 
         let now = Utc::now();
 
-        let (video_status, audio_status) = {
+        let (video_status, audio_status, control_status) = {
             let channel_status_read = channel_status.read().unwrap();
-            let video_status = match &channel_status_read.video {
-                Some(stream) => {
-                    if now - stream.last_packet_seen > state_change_interval {
-                        "off"
-                    } else {
-                        "on"
-                    }
-                }
-                None => "unknown"
-            };
-            let audio_status = match &channel_status_read.audio {
-                Some(stream) => {
-                    if now - stream.last_packet_seen > state_change_interval {
-                        "off"
-                    } else {
-                        "on"
-                    }
-                }
-                None => "unknown"
-            };
-            (video_status, audio_status)
+            let video_status = get_channel_status(channel_status_read.video, now, Duration::milliseconds(200));
+            let audio_status = get_channel_status(channel_status_read.audio, now,  Duration::milliseconds(200));
+            let control_status = get_channel_status(channel_status_read.audio, now,  Duration::milliseconds(1000));
+            (video_status, audio_status, control_status)
         };
 
-        println!("Statuses: Video: {:?} Audio: {:?}", video_status, audio_status);
+        println!("Statuses: Video: {:?} Audio: {:?} Control: {:?}", video_status, audio_status, control_status);
 
         if video_status != "unknown" && audio_status != "unknown" && discover_mode {
             println!("Both channels have a status, switching to monitor mode");
