@@ -109,6 +109,23 @@ fn main() {
             packet_thread = stoppable_thread::spawn(enclose!((capture_device, channel_status) move |stopped| {
                 stream_analyser::PortMonitorCapture::run(capture_device, channel_status, stopped)
             }));
+        } else if !discover_mode && control_status == "off" {
+            println!("Control port no longer sending traffic, returning to discover mode");
+
+            packet_thread.stop().join().unwrap();
+            discover_mode = true;
+
+            {
+                // Wipe out known channel statuses so we can restart monitoring
+                let mut channel_status_write = channel_status.write().unwrap();
+                channel_status_write.video = None;
+                channel_status_write.audio = None;
+                channel_status_write.control = None;
+            }
+
+            packet_thread = stoppable_thread::spawn(enclose!((capture_device, channel_status) move |stopped| {
+                stream_analyser::PortDiscoveryCapture::run(capture_device, channel_status, stopped)
+            }));
         }
 
         thread::sleep(std::time::Duration::from_millis(100));
