@@ -125,8 +125,10 @@ impl PortDiscoveryCapture {
                         }
 
                     } else if matched_stream.average_packet_size > AUDIO_ABOVE {
-                        // Check this isn't currently the video port - sometimes we get a small packet
-                        if !PortDiscoveryCapture::existing_match(port, write_map.video) {
+                        if PortDiscoveryCapture::existing_match(port, write_map.video) {
+                            // If this port is currently thought to be video, keep it that way and assign it there
+                            write_map.video = Some(matched_stream.clone());
+                        } else {
                             write_map.audio = Some(matched_stream.clone());
                         }
 
