@@ -101,8 +101,8 @@ fn main() {
 
         println!("Statuses: Video: {:?} Audio: {:?} Control: {:?}", video_status, audio_status, control_status);
 
-        if video_status != "unknown" && audio_status != "unknown" && discover_mode {
-            println!("Both channels have a status, switching to monitor mode");
+        if video_status != "unknown" && audio_status != "unknown" && control_status != "unknown" && discover_mode {
+            println!("All channels have a status, switching to monitor mode");
             packet_thread.stop().join().unwrap();
             discover_mode = false;
 
