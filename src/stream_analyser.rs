@@ -115,25 +115,29 @@ impl PortDiscoveryCapture {
                 {
                     let mut write_map = channel_map.write().unwrap();
                     if matched_stream.average_packet_size > VIDEO_ABOVE {
-                        // If it's big enough to be video, it probably is - audio doesn't tend to lead to large packets
-                        write_map.video = Some(matched_stream.clone());
-
                         // Check it didn't get misassigned to the audio port, remove it if so
                         if PortDiscoveryCapture::existing_match(port, write_map.audio) {
                             write_map.audio = None;
                         }
 
+                        // Check it didn't get misassigned to the control port, remove it if so
+                        if PortDiscoveryCapture::existing_match(port, write_map.control) {
+                            write_map.control = None;
+                        }
+
+                        // If it's big enough to be video, it probably is - audio doesn't tend to lead to large packets
+                        write_map.video = Some(matched_stream.clone());
                     } else if matched_stream.average_packet_size > AUDIO_ABOVE {
+                        // Check it didn't get misassigned to the control port, remove it if so
+                        if PortDiscoveryCapture::existing_match(port, write_map.control) {
+                            write_map.control = None;
+                        }
+
                         if PortDiscoveryCapture::existing_match(port, write_map.video) {
                             // If this port is currently thought to be video, keep it that way and assign it there
                             write_map.video = Some(matched_stream.clone());
                         } else {
                             write_map.audio = Some(matched_stream.clone());
-                        }
-
-                        // Check it didn't get misassigned to the control port, remove it if so
-                        if PortDiscoveryCapture::existing_match(port, write_map.control) {
-                            write_map.control = None;
                         }
                     } else {
                         // Check we don't currently think this port is the audio or video port
