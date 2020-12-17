@@ -12,8 +12,8 @@ use crate::custom_device::CustomDevice;
 /// Length of the moving average window used to calculate average packet size
 const BITRATE_WINDOW_SIZE: u16 = 10;
 
-/// If the packet is smaller than average_size / DROP_FACTOR, it's a keep alive, ignore it
-const DROP_FACTOR: u16 = 5 ;
+/// If the packet is smaller than this (and we don't think it's the control port) it's a keepalive - ignore it
+const KEEPALIVE_UNDER: u16 = 70 ;
 
 /// A stream of packets larger than this many bytes is probably audio
 const AUDIO_ABOVE: u16 = 90;
@@ -44,9 +44,8 @@ impl PacketStream {
     ///
     /// Note that packets smaller than `average_packet_size / DROP_FACTOR` will be ignored (and won't update the last seen timestamp)
     ///
-    pub fn add_packet(&mut self, packet_length: u16) {
-        // If the packet is less than 1/DROP_FACTOR the size of the average, ignore it, it's a keepalive
-        if packet_length * DROP_FACTOR >= self.average_packet_size {
+    pub fn add_packet(&mut self, packet_length: u16, ignore_small: bool) {
+        if !ignore_small || packet_length >= KEEPALIVE_UNDER {
             self.average_packet_size -= self.average_packet_size / BITRATE_WINDOW_SIZE;
             self.average_packet_size += packet_length / BITRATE_WINDOW_SIZE;
 
@@ -109,7 +108,7 @@ impl PortDiscoveryCapture {
             let (port, length) = unpack_packet(packet);
 
             let matched_stream = stream_map.entry(port).or_insert(PacketStream::new(port));
-            matched_stream.add_packet(length);
+            matched_stream.add_packet(length, false);
 
             if matched_stream.window_size >= BITRATE_WINDOW_SIZE {
                 // Enough packets have come in to decide which type of stream this is
@@ -180,10 +179,12 @@ impl PortMonitorCapture {
     pub fn run(capture_device: CustomDevice, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
         let mut video_stream;
         let mut audio_stream;
+        let mut control_stream;
         {
             let read_map = channel_map.read().unwrap();
             video_stream = read_map.video.unwrap().clone();
             audio_stream = read_map.audio.unwrap().clone();
+            control_stream = read_map.control.unwrap().clone();
         }
 
         let mut cap = get_capture(capture_device, format!("udp && (src port {} || src port {})", video_stream.source_port, audio_stream.source_port));
@@ -194,11 +195,14 @@ impl PortMonitorCapture {
             {
                 let mut write_map = channel_map.write().unwrap();
                 if port == video_stream.source_port {
-                    video_stream.add_packet(length);
+                    video_stream.add_packet(length, true);
                     write_map.video = Some(video_stream.clone());
                 } else if port == audio_stream.source_port {
-                    audio_stream.add_packet(length);
+                    audio_stream.add_packet(length, true);
                     write_map.audio = Some(audio_stream.clone());
+                } else if port == control_stream.source_port {
+                    control_stream.add_packet(length, false);
+                    write_map.control = Some(control_stream.clone());
                 }
             }
 
