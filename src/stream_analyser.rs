@@ -13,10 +13,10 @@ use crate::custom_device::CustomDevice;
 const BITRATE_WINDOW_SIZE: u16 = 10;
 
 /// If the packet is smaller than this (and we don't think it's the control port) it's a keepalive - ignore it
-const KEEPALIVE_UNDER: u16 = 70 ;
+const KEEPALIVE_UNDER: u16 = 75;
 
 /// A stream of packets larger than this many bytes is probably audio
-const AUDIO_ABOVE: u16 = 90;
+const AUDIO_ABOVE: u16 = 80;
 
 /// A stream of packets larger than this many bytes is probably video
 const VIDEO_ABOVE: u16 = 500;
