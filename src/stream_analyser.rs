@@ -1,12 +1,12 @@
-use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use pcap::{Capture, Active, Packet};
 use etherparse::{SlicedPacket,TransportSlice};
 use stoppable_thread::SimpleAtomicBool;
+use single_value_channel;
 
-use crate::zoom_channels;
+use crate::zoom_channels::{ZoomSessionState, ZoomChannelStatus};
 use crate::custom_device::CustomDevice;
 
 /// Length of the moving average window used to calculate average packet size
@@ -28,6 +28,12 @@ pub struct PacketStream {
     pub average_packet_size: u16,
     pub last_packet_seen: DateTime<Utc>,
     window_size: u16
+}
+
+#[derive(Hash, Eq, PartialEq, Debug, Clone, Copy)]
+enum Mode {
+    Discover,
+    Monitor
 }
 
 impl PacketStream {
@@ -88,67 +94,59 @@ fn unpack_packet(packet: Packet) -> (u16, u16) {
 }
 
 /// Implements a capture process that discovers which port is which (video, audio, control)
-pub struct PortDiscoveryCapture ();
+#[derive(Debug, Clone)]
+pub struct ZoomChannelCapture {
+    session_state: ZoomSessionState,
+    mode: Mode,
+    capture_device: CustomDevice,
+    channel_tx: single_value_channel::Updater<ZoomSessionState>,
+    stream_map: HashMap<u16, PacketStream>
+}
 
-impl PortDiscoveryCapture {
-    /// Start a capture to detect which port is which
-    ///
-    /// Watches for outgoing UDP packets to port 8801 and measures their size to guess which is audio, which is video and
-    /// which is the control port. Expects to be run in a thread and report back to the main thread.
+impl ZoomChannelCapture {
+    /// Set up for capturing active channels
     ///
     /// # Arguments
     /// * `capture_device` - Device (as known to the system) to capture packets on
-    /// * `channel_map` - This will be updated with each port as detections are made
-    /// * `stopped` - Set to true to cause the thread to exit
-    pub fn run(capture_device: CustomDevice, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
-        let mut cap = get_capture(capture_device, "udp && dst port 8801".to_string());
-        let mut stream_map = HashMap::new();
+    /// * `channel_tx` - Updater to which new channel mapping data is sent
+    pub fn new(capture_device: CustomDevice, channel_tx: single_value_channel::Updater<ZoomSessionState>) -> ZoomChannelCapture {
+        ZoomChannelCapture {
+            session_state: ZoomSessionState::new(),
+            mode: Mode::Discover,
+            capture_device: capture_device,
+            channel_tx: channel_tx,
+            stream_map: HashMap::new()
+        }
+    }
 
+    /// Start a capture and report discovered status
+    ///
+    /// Watches for outgoing UDP packets to port 8801 and measures their size to guess which is audio, which is video
+    /// and whether one is the control port. Switches modes once ports found to monitor them until no packets are
+    /// received for a while, then goes back to discovery mode again. Reports status back up to main thread
+    ///
+    /// # Arguments
+    /// * `stopped` - Set to true to cause the thread to exit
+    pub fn run(&mut self, stopped: &SimpleAtomicBool) {
+        let mut cap = get_capture(self.capture_device.clone(), "udp && dst port 8801".to_string());
+
+        // Continuously read packets, or update the status if packet fetch timed out
         while let Ok(packet) = cap.next() {
             let (port, length) = unpack_packet(packet);
 
-            let matched_stream = stream_map.entry(port).or_insert(PacketStream::new(port));
-            matched_stream.add_packet(length, false);
+            match self.mode {
+                Mode::Discover => self.guess_stream_for_packet(port, length),
+                Mode::Monitor => self.update_relevant_packet_stream(port, length)
+            };
 
-            if matched_stream.window_size >= BITRATE_WINDOW_SIZE {
-                // Enough packets have come in to decide which type of stream this is
-                {
-                    let mut write_map = channel_map.write().unwrap();
-                    if matched_stream.average_packet_size > VIDEO_ABOVE {
-                        // Check it didn't get misassigned to the audio port, remove it if so
-                        if PortDiscoveryCapture::existing_match(port, write_map.audio) {
-                            write_map.audio = None;
-                        }
+            // Recalculate channel statuses
+            self.session_state.update_channels();
 
-                        // Check it didn't get misassigned to the control port, remove it if so
-                        if PortDiscoveryCapture::existing_match(port, write_map.control) {
-                            write_map.control = None;
-                        }
+            // Check if we need to switch modes
+            self.mode = self.update_mode();
 
-                        // If it's big enough to be video, it probably is - audio doesn't tend to lead to large packets
-                        write_map.video = Some(matched_stream.clone());
-                    } else if matched_stream.average_packet_size > AUDIO_ABOVE {
-                        // Check it didn't get misassigned to the control port, remove it if so
-                        if PortDiscoveryCapture::existing_match(port, write_map.control) {
-                            write_map.control = None;
-                        }
-
-                        if PortDiscoveryCapture::existing_match(port, write_map.video) {
-                            // If this port is currently thought to be video, keep it that way and assign it there
-                            write_map.video = Some(matched_stream.clone());
-                        } else {
-                            write_map.audio = Some(matched_stream.clone());
-                        }
-                    } else {
-                        // Check we don't currently think this port is the audio or video port
-                        // In that case it's unlikely to be control!
-                        if !PortDiscoveryCapture::existing_match(port, write_map.video) &&
-                            !PortDiscoveryCapture::existing_match(port, write_map.audio) {
-                            write_map.control = Some(matched_stream.clone());
-                        }
-                    }
-                }
-            }
+            // Send latest update
+            self.channel_tx.update(self.session_state.clone()).unwrap();
 
             if stopped.get() {
                 break;
@@ -156,6 +154,9 @@ impl PortDiscoveryCapture {
         }
     }
 
+    /// Check if a given port already matches a stream
+    ///
+    /// Returns true if the stream isn't None, and the ports match. False otherwise.
     fn existing_match(port: u16, stream: Option<PacketStream>) -> bool {
         if let Some(stream_data) = stream {
             if stream_data.source_port == port {
@@ -165,54 +166,86 @@ impl PortDiscoveryCapture {
 
         return false;
     }
-}
 
-/// Implements a capture process that watches the audio and video ports only, and updates their last packet times
-pub struct PortMonitorCapture ();
-
-impl PortMonitorCapture {
-    /// Start a capture to detect when the audio and video ports were last used
+    /// Check our current mode, and decide whether the session state means we need to change
     ///
-    /// Watches for outgoing UDP packets on the audio and video ports, and reports when they last had a packet seen.
-    /// Expects to be run in a thread and report back to the main thread.
-    ///
-    /// # Arguments
-    /// * `capture_device` - Device (as known to the system) to capture packets on
-    /// * `channel_map` - Existing map of audio and video ports, to update as detections are made
-    /// * `stopped` - Set to true to cause the thread to exit
-    pub fn run(capture_device: CustomDevice, channel_map: Arc<RwLock<zoom_channels::ZoomChannels>>, stopped: &SimpleAtomicBool) {
-        let mut video_stream;
-        let mut audio_stream;
-        let mut control_stream;
-        {
-            let read_map = channel_map.read().unwrap();
-            video_stream = read_map.video.unwrap().clone();
-            audio_stream = read_map.audio.unwrap().clone();
-            control_stream = read_map.control.unwrap().clone();
+    /// If we're in Discover mode, but have found both ports, swap to Monitor
+    /// If we're in Monitor mode but the call has dropped, swap to Discover
+    fn update_mode(&mut self) -> Mode {
+        match self.mode {
+            Mode::Discover => {
+                if self.session_state.video != ZoomChannelStatus::Unknown && self.session_state.audio != ZoomChannelStatus::Unknown {
+                    return Mode::Monitor
+                }
+                return Mode::Discover
+            }
+            Mode::Monitor => {
+                if self.session_state.call != ZoomChannelStatus::On {
+                    return Mode::Discover
+                }
+                return Mode::Monitor
+            }
         }
+    }
 
-        let mut cap = get_capture(capture_device, format!("udp && (src port {} || src port {})", video_stream.source_port, audio_stream.source_port));
+    /// Given a packet, try to discover which stream it belongs to
+    ///
+    /// Takes detected packets and applies guesswork based on their size to allocate them to the video, audio or
+    /// control streams.
+    fn guess_stream_for_packet(&mut self, port: u16, length: u16) {
+        let matched_stream = self.stream_map.entry(port).or_insert(PacketStream::new(port));
+        matched_stream.add_packet(length, false);
 
-        while let Ok(packet) = cap.next() {
-            let (port, length) = unpack_packet(packet);
+        if matched_stream.window_size >= BITRATE_WINDOW_SIZE {
+            // Enough packets have come in to decide which type of stream this is
+            if matched_stream.average_packet_size > VIDEO_ABOVE {
+                // Check it didn't get misassigned to the audio port, remove it if so
+                if ZoomChannelCapture::existing_match(port, self.session_state.channels.audio) {
+                    self.session_state.channels.audio = None;
+                }
 
-            {
-                let mut write_map = channel_map.write().unwrap();
-                if port == video_stream.source_port {
-                    video_stream.add_packet(length, true);
-                    write_map.video = Some(video_stream.clone());
-                } else if port == audio_stream.source_port {
-                    audio_stream.add_packet(length, true);
-                    write_map.audio = Some(audio_stream.clone());
-                } else if port == control_stream.source_port {
-                    control_stream.add_packet(length, false);
-                    write_map.control = Some(control_stream.clone());
+                // Check it didn't get misassigned to the control port, remove it if so
+                if ZoomChannelCapture::existing_match(port, self.session_state.channels.control) {
+                    self.session_state.channels.control = None;
+                }
+
+                // If it's big enough to be video, it probably is - audio doesn't tend to lead to large packets
+                self.session_state.channels.video = Some(matched_stream.clone());
+            } else if matched_stream.average_packet_size > AUDIO_ABOVE {
+                // Check it didn't get misassigned to the control port, remove it if so
+                if ZoomChannelCapture::existing_match(port, self.session_state.channels.control) {
+                    self.session_state.channels.control = None;
+                }
+
+                if ZoomChannelCapture::existing_match(port, self.session_state.channels.video) {
+                    // If this port is currently thought to be video, keep it that way and assign it there
+                    self.session_state.channels.video = Some(matched_stream.clone());
+                } else {
+                    self.session_state.channels.audio = Some(matched_stream.clone());
+                }
+            } else {
+                // Check we don't currently think this port is the audio or video port
+                // In that case it's unlikely to be control!
+                if !ZoomChannelCapture::existing_match(port, self.session_state.channels.video) &&
+                    !ZoomChannelCapture::existing_match(port, self.session_state.channels.audio) {
+                        self.session_state.channels.control = Some(matched_stream.clone());
                 }
             }
+        }
+    }
 
-            if stopped.get() {
-                break;
+    /// Find the packet stream that relates to the packet we just got, and update it
+    fn update_relevant_packet_stream(&mut self, port: u16, length: u16) {
+        let stream_list = &[self.session_state.channels.video, self.session_state.channels.audio, self.session_state.channels.control];
+
+        for stream in stream_list {
+            if ZoomChannelCapture::existing_match(port, *stream) {
+                stream.unwrap().add_packet(length, true);
+                return;
             }
         }
+
+        // If we got here, there's a packet we don't recognise, which isn't ideal! Force us back to Discover mode
+        self.mode = Mode::Discover;
     }
 }
