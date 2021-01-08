@@ -4,14 +4,12 @@
 //! whether they are currently active (i.e is the camera on, is the mic open?). Outputs data
 //! to stdout which can be parsed by other tools.
 use std::thread;
-use std::sync::Arc;
-use std::sync::RwLock;
 
-use chrono::{Utc, Duration, DateTime};
 use pcap::Device;
 use stoppable_thread;
 use enclose::enclose;
 use argparse::{ArgumentParser, StoreOption, StoreTrue};
+use single_value_channel;
 
 mod stream_analyser;
 mod zoom_channels;
@@ -56,77 +54,25 @@ fn parse_args() -> CustomDevice {
     return capture_device
 }
 
-fn get_channel_status(stream: Option<stream_analyser::PacketStream>, now: DateTime<Utc>, timeout: Duration) -> String {
-    match &stream {
-        Some(stream) => {
-            if now - stream.last_packet_seen > timeout {
-                "off".to_string()
-            } else {
-                "on".to_string()
-            }
-        }
-        None => "unknown".to_string()
-    }
-}
-
 fn main() {
     let capture_device = parse_args();
 
     println!("Got device {:?}", capture_device);
 
-    let channel_status = Arc::new(RwLock::new(zoom_channels::ZoomChannels {
-        video: None,
-        audio: None,
-        control: None
+    let (mut channel_rx, channel_tx) = single_value_channel::channel_starting_with(zoom_channels::ZoomSessionState::new());
+
+    let stream_analyser = stream_analyser::ZoomChannelCapture::new(capture_device, channel_tx);
+
+    stoppable_thread::spawn(enclose!((mut stream_analyser) move |stopped| {
+        stream_analyser.run(stopped)
     }));
 
-    let mut packet_thread = stoppable_thread::spawn(enclose!((capture_device, channel_status) move |stopped| {
-        stream_analyser::PortDiscoveryCapture::run(capture_device, channel_status, stopped)
-    }));
-
-    let mut discover_mode = true;
 
     loop {
-        println!("Current streams known {:?}", channel_status);
+        let session_status = channel_rx.latest().clone();
+        println!("Current streams known {:?}", session_status);
 
-        let now = Utc::now();
-
-        let (video_status, audio_status, control_status) = {
-            let channel_status_read = channel_status.read().unwrap();
-            let video_status = get_channel_status(channel_status_read.video, now, Duration::milliseconds(200));
-            let audio_status = get_channel_status(channel_status_read.audio, now,  Duration::milliseconds(200));
-            let control_status = get_channel_status(channel_status_read.audio, now,  Duration::milliseconds(1000));
-            (video_status, audio_status, control_status)
-        };
-
-        println!("Statuses: Video: {:?} Audio: {:?} Control: {:?}", video_status, audio_status, control_status);
-
-        if video_status != "unknown" && audio_status != "unknown" && control_status != "unknown" && discover_mode {
-            println!("All channels have a status, switching to monitor mode");
-            packet_thread.stop().join().unwrap();
-            discover_mode = false;
-
-            packet_thread = stoppable_thread::spawn(enclose!((capture_device, channel_status) move |stopped| {
-                stream_analyser::PortMonitorCapture::run(capture_device, channel_status, stopped)
-            }));
-        } else if !discover_mode && control_status == "off" {
-            println!("Control port no longer sending traffic, returning to discover mode");
-
-            packet_thread.stop().join().unwrap();
-            discover_mode = true;
-
-            {
-                // Wipe out known channel statuses so we can restart monitoring
-                let mut channel_status_write = channel_status.write().unwrap();
-                channel_status_write.video = None;
-                channel_status_write.audio = None;
-                channel_status_write.control = None;
-            }
-
-            packet_thread = stoppable_thread::spawn(enclose!((capture_device, channel_status) move |stopped| {
-                stream_analyser::PortDiscoveryCapture::run(capture_device, channel_status, stopped)
-            }));
-        }
+        println!("Statuses: Video: {:?} Audio: {:?} Control: {:?}", session_status.video, session_status.audio, session_status.call);
 
         thread::sleep(std::time::Duration::from_millis(100));
 
